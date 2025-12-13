@@ -5,6 +5,7 @@ set -e  # 遇到错误立即退出
 RED='\033[31m'
 GREEN='\033[32m'
 YELLOW='\033[33m'
+BLUE='\033[34m'
 NC='\033[0m'  # 重置颜色
 
 # 全局变量：服务名/工作目录/日志路径（适配咪咕视频配置）
@@ -14,6 +15,8 @@ DEFAULT_WORK_DIR="/root/migu_video"
 DEFAULT_LOG_FILE="/root/migu_video/migu_video.log"
 NODE_PATH="/usr/bin/node"  # 固定 Node 路径
 NPM_PATH="/usr/bin/npm"    # npm 路径（用于安装依赖）
+GITHUB_REPO="https://github.com/zAhYAng/migu_video.git"
+BACKUP_DIR="/root/migu_video_backup"
 
 # ====================== 工具函数：检查是否为 root ======================
 check_root() {
@@ -209,24 +212,263 @@ uninstall_service() {
     exit 0
 }
 
-# ====================== 第一步：选择操作模式（启动/卸载） ======================
+# ====================== 工具函数：更新服务 ======================
+update_service() {
+    echo -e "${BLUE}=======================================${NC}"
+    echo -e "${BLUE}          开始更新咪咕视频服务           ${NC}"
+    echo -e "${BLUE}=======================================${NC}"
+
+    check_root
+    
+    # 读取工作目录
+    read -p "${YELLOW}请输入当前服务工作目录（默认：$DEFAULT_WORK_DIR）：${NC}" WORK_DIR
+    WORK_DIR=${WORK_DIR:-$DEFAULT_WORK_DIR}
+    
+    # 检查工作目录是否存在
+    if [ ! -d "$WORK_DIR" ]; then
+        echo -e "${RED}错误：工作目录 $WORK_DIR 不存在！${NC}"
+        echo -e "${YELLOW}请先使用模式1安装服务${NC}"
+        exit 1
+    fi
+
+    # 检查 app.js 是否存在
+    if [ ! -f "$WORK_DIR/app.js" ]; then
+        echo -e "${RED}错误：未找到 app.js 文件${NC}"
+        exit 1
+    fi
+
+    # 备份配置文件
+    echo -e "${YELLOW}第一步：备份当前配置文件${NC}"
+    CONFIG_BACKUP="$BACKUP_DIR/config_$(date +%Y%m%d_%H%M%S).txt"
+    mkdir -p "$BACKUP_DIR"
+    
+    # 从现有文件中提取配置
+    if [ -f "$WORK_DIR/app.js" ]; then
+        echo "# 备份时间: $(date)" > "$CONFIG_BACKUP"
+        echo "# 备份目录: $WORK_DIR" >> "$CONFIG_BACKUP"
+        
+        # 尝试从 app.js 中提取配置（如果存在）
+        grep -E "(muserId|mtoken|mport|mhost|mrateType)" "$WORK_DIR/app.js" >> "$CONFIG_BACKUP" 2>/dev/null || true
+        
+        # 如果有 systemd 服务，也从中提取环境变量
+        if [ -f "$SERVICE_FILE" ]; then
+            echo "" >> "$CONFIG_BACKUP"
+            echo "# Systemd 服务配置" >> "$CONFIG_BACKUP"
+            grep -E "Environment=" "$SERVICE_FILE" >> "$CONFIG_BACKUP"
+        fi
+        
+        echo -e "${GREEN}配置文件已备份到: $CONFIG_BACKUP${NC}"
+    fi
+
+    # 停止当前服务
+    echo -e "${YELLOW}第二步：停止当前服务${NC}"
+    if systemctl is-active --quiet $SERVICE_NAME 2>/dev/null; then
+        echo -n "停止 systemd 服务..."
+        systemctl stop $SERVICE_NAME
+        echo -e "${GREEN}完成${NC}"
+    else
+        echo -n "停止 Node.js 进程..."
+        APP_PIDS=$(ps aux | grep "$NODE_PATH app.js" | grep -v grep | awk '{print $2}')
+        if [ -n "$APP_PIDS" ]; then
+            kill -9 $APP_PIDS > /dev/null 2>&1
+            echo -e "${GREEN}完成（杀死进程：$APP_PIDS）${NC}"
+        else
+            echo -e "${YELLOW}无运行中的进程${NC}"
+        fi
+    fi
+
+    # 备份当前代码
+    echo -e "${YELLOW}第三步：备份当前代码${NC}"
+    BACKUP_CODE="$BACKUP_DIR/code_$(date +%Y%m%d_%H%M%S).tar.gz"
+    tar -czf "$BACKUP_CODE" -C "$WORK_DIR" .
+    echo -e "${GREEN}代码已备份到: $BACKUP_CODE${NC}"
+
+    # 清理工作目录（保留日志和 node_modules）
+    echo -e "${YELLOW}第四步：清理工作目录${NC}"
+    cd "$WORK_DIR"
+    
+    # 备份重要文件
+    TEMP_BACKUP="/tmp/migu_temp_$(date +%s)"
+    mkdir -p "$TEMP_BACKUP"
+    
+    # 保留重要文件
+    if [ -f "package.json" ]; then
+        cp package.json "$TEMP_BACKUP/"
+    fi
+    if [ -d "node_modules" ]; then
+        echo -n "保留 node_modules 目录..."
+        # 只保留，不移除
+        echo -e "${GREEN}完成${NC}"
+    fi
+    if [ -f ".env" ]; then
+        cp .env "$TEMP_BACKUP/"
+    fi
+
+    # 移除其他文件（保留 node_modules 和日志）
+    echo -n "清理工作目录..."
+    find . -maxdepth 1 ! -name '.' ! -name 'node_modules' ! -name 'migu_video.log' ! -name '*.log' -exec rm -rf {} + 2>/dev/null || true
+    echo -e "${GREEN}完成${NC}"
+
+    # 从 GitHub 克隆最新代码
+    echo -e "${YELLOW}第五步：从 GitHub 下载最新代码${NC}"
+    echo -n "克隆仓库 $GITHUB_REPO ..."
+    
+    # 检查 git 是否安装
+    if ! command -v git &> /dev/null; then
+        echo -e "${RED}失败${NC}"
+        echo -e "${RED}错误：未安装 git，请先安装：apt install git${NC}"
+        exit 1
+    fi
+    
+    # 克隆到临时目录
+    TEMP_CLONE="/tmp/migu_clone_$(date +%s)"
+    git clone --depth=1 "$GITHUB_REPO" "$TEMP_CLONE" > /dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}成功${NC}"
+        
+        # 复制文件到工作目录
+        echo -n "复制文件到工作目录..."
+        cp -r "$TEMP_CLONE"/* "$WORK_DIR"/ 2>/dev/null || true
+        cp -r "$TEMP_CLONE"/.* "$WORK_DIR"/ 2>/dev/null 2>&1 || true
+        
+        # 恢复保留的文件
+        if [ -f "$TEMP_BACKUP/package.json" ]; then
+            cp "$TEMP_BACKUP/package.json" "$WORK_DIR/"
+        fi
+        if [ -f "$TEMP_BACKUP/.env" ]; then
+            cp "$TEMP_BACKUP/.env" "$WORK_DIR/"
+        fi
+        
+        # 清理临时目录
+        rm -rf "$TEMP_CLONE"
+        rm -rf "$TEMP_BACKUP"
+        
+        echo -e "${GREEN}完成${NC}"
+    else
+        echo -e "${RED}失败${NC}"
+        echo -e "${RED}错误：无法从 GitHub 克隆代码，请检查网络连接${NC}"
+        
+        # 尝试恢复备份
+        echo -n "尝试恢复备份..."
+        tar -xzf "$BACKUP_CODE" -C "$WORK_DIR"
+        echo -e "${GREEN}已恢复备份${NC}"
+        exit 1
+    fi
+
+    # 重新安装依赖
+    echo -e "${YELLOW}第六步：重新安装依赖${NC}"
+    install_node_deps "$WORK_DIR"
+
+    # 恢复配置（如果有配置文件）
+    echo -e "${YELLOW}第七步：恢复配置${NC}"
+    
+    # 询问是否使用原有配置
+    read -p "${YELLOW}是否使用原有的配置文件？(y/n，默认y) ${NC}" -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+        echo -e "${YELLOW}请在重启后手动配置${NC}"
+    else
+        # 如果有 systemd 服务文件，重启服务即可（配置在服务文件中）
+        if [ -f "$SERVICE_FILE" ]; then
+            echo -n "重启 systemd 服务..."
+            systemctl daemon-reload
+            systemctl start $SERVICE_NAME
+            echo -e "${GREEN}完成${NC}"
+            
+            # 检查服务状态
+            sleep 2
+            if systemctl is-active --quiet $SERVICE_NAME; then
+                echo -e "${GREEN}服务启动成功！${NC}"
+                
+                # 获取配置信息
+                MHOST=$(grep "Environment=\"mhost=" "$SERVICE_FILE" | cut -d= -f3 | tr -d '"')
+                MPORT=$(grep "Environment=\"mport=" "$SERVICE_FILE" | cut -d= -f3 | tr -d '"')
+                
+                # 显示 M3U 地址
+                if [ -n "$MHOST" ] && [ -n "$MPORT" ]; then
+                    local host_ip=$(echo "$MHOST" | awk -F'[:/]' '{print $4}')
+                    echo -e "\n${GREEN}M3U 访问地址：http://$host_ip:$MPORT${NC}"
+                fi
+            else
+                echo -e "${YELLOW}服务启动状态异常，请检查：${NC}"
+                echo "systemctl status $SERVICE_NAME"
+                journalctl -u $SERVICE_NAME -n 20 --no-pager
+            fi
+        else
+            echo -e "${YELLOW}未找到 systemd 服务，需要手动启动${NC}"
+            echo -e "${YELLOW}请进入目录手动启动：${NC}"
+            echo "cd $WORK_DIR"
+            echo "node app.js"
+        fi
+    fi
+
+    echo -e "\n${GREEN}=======================================${NC}"
+    echo -e "${GREEN}          服务更新完成！                ${NC}"
+    echo -e "${GREEN}=======================================${NC}"
+    echo -e "${YELLOW}备份文件位置：${NC}"
+    echo "  - 代码备份: $BACKUP_CODE"
+    echo "  - 配置备份: $CONFIG_BACKUP"
+    echo -e "\n${YELLOW}如需恢复备份：${NC}"
+    echo "  tar -xzf $BACKUP_CODE -C $WORK_DIR"
+    
+    exit 0
+}
+
+# ====================== 工具函数：检查端口冲突 ======================
+check_port() {
+    local port=$1
+    echo -n "检查端口 $port 是否可用..."
+    
+    # 检查端口是否被占用
+    if netstat -tuln 2>/dev/null | grep ":$port " > /dev/null; then
+        # 检查是否是自己占用
+        PID=$(lsof -ti:$port 2>/dev/null || echo "")
+        if [ -n "$PID" ]; then
+            # 检查是否是这个服务占用的
+            if ps -p $PID -o cmd= | grep -q "node app.js"; then
+                echo -e "${YELLOW}被本服务占用（PID: $PID）${NC}"
+                return 0  # 是自己占用的，可以继续
+            fi
+        fi
+        echo -e "${RED}失败（已被其他进程占用）${NC}"
+        echo -e "${YELLOW}当前占用进程：${NC}"
+        lsof -i:$port 2>/dev/null || netstat -tulpn 2>/dev/null | grep ":$port "
+        return 1
+    else
+        echo -e "${GREEN}可用${NC}"
+        return 0
+    fi
+}
+
+# ====================== 第一步：选择操作模式（启动/更新/卸载） ======================
 echo -e "${GREEN}=======================================${NC}"
 echo -e "${GREEN}      咪咕视频 Node.js 服务管理脚本      ${NC}"
 echo -e "${GREEN}=======================================${NC}"
 echo -e "${YELLOW}请选择操作模式：${NC}"
 echo "  1) 启动/配置服务（含开机自启）"
-echo "  2) 卸载服务（停止+删除配置+清理进程）"
-read -p "输入选择（1/2，默认1）：" OPTION
+echo "  2) 更新服务（从 GitHub 下载最新代码）"
+echo "  3) 卸载服务（停止+删除配置+清理进程）"
+read -p "输入选择（1/2/3，默认1）：" OPTION
 OPTION=${OPTION:-1}
 
-# 判断是否卸载
-if [ "$OPTION" = "2" ]; then
-    check_root
-    # 读取工作目录（用于清理）
-    read -p "请输入服务工作目录（默认：$DEFAULT_WORK_DIR）：" WORK_DIR
-    WORK_DIR=${WORK_DIR:-$DEFAULT_WORK_DIR}
-    uninstall_service
-fi
+# 判断操作模式
+case "$OPTION" in
+    2)
+        # 更新服务
+        update_service
+        ;;
+    3)
+        # 卸载服务
+        check_root
+        read -p "请输入服务工作目录（默认：$DEFAULT_WORK_DIR）：" WORK_DIR
+        WORK_DIR=${WORK_DIR:-$DEFAULT_WORK_DIR}
+        uninstall_service
+        ;;
+    *)
+        # 默认：启动/配置服务
+        ;;
+esac
 
 # ====================== 第二步：环境前置检查（启动模式） ======================
 echo -e "\n${YELLOW}第一步：环境前置检查${NC}"
@@ -268,6 +510,17 @@ else
     SUPPORT_SYSTEMD=1
 fi
 
+# 检查 git 是否安装（用于未来可能的更新）
+echo -n "检测 git..."
+if ! command -v git &> /dev/null; then
+    echo -e "${YELLOW}未安装${NC}"
+    echo -e "${YELLOW}提示：如需使用更新功能，请先安装 git：apt install git${NC}"
+    HAS_GIT=0
+else
+    echo -e "${GREEN}已安装${NC}"
+    HAS_GIT=1
+fi
+
 # ====================== 第三步：交互式输入配置参数 ======================
 echo -e "\n${YELLOW}第二步：输入应用配置参数（直接回车使用默认值）${NC}"
 
@@ -285,6 +538,17 @@ MTOKEN=${MTOKEN:-$DEFAULT_MTOKEN}
 DEFAULT_MPORT="1234"
 read -p "请输入 mport（默认：$DEFAULT_MPORT）：" MPORT
 MPORT=${MPORT:-$DEFAULT_MPORT}
+
+# 检查端口是否可用
+check_port "$MPORT"
+if [ $? -ne 0 ]; then
+    read -p "${YELLOW}端口冲突，是否继续？(y/n，默认n) ${NC}" -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo -e "${RED}操作取消${NC}"
+        exit 1
+    fi
+fi
 
 # 4. 输入 mhost
 DEFAULT_MHOST="http://10.10.1.4:1234"
@@ -311,9 +575,32 @@ ensure_log_file "$LOG_FILE"
 APP_JS_PATH="$WORK_DIR/app.js"
 echo -n "检查 app.js 文件 ($APP_JS_PATH)..."
 if [ ! -f "$APP_JS_PATH" ]; then
-    echo -e "${RED}失败${NC}"
-    echo -e "${RED}错误：未找到 app.js 文件（路径：$APP_JS_PATH）${NC}"
-    exit 1
+    echo -e "${YELLOW}未找到，尝试从 GitHub 下载...${NC}"
+    
+    if [ $HAS_GIT -eq 1 ]; then
+        read -p "${YELLOW}是否从 GitHub 下载最新代码？(y/n，默认y) ${NC}" -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            # 创建目录并克隆代码
+            mkdir -p "$WORK_DIR"
+            cd "$WORK_DIR"
+            echo -n "从 GitHub 克隆代码..."
+            git clone --depth=1 "$GITHUB_REPO" . > /dev/null 2>&1
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}成功${NC}"
+            else
+                echo -e "${RED}失败${NC}"
+                echo -e "${RED}错误：无法从 GitHub 下载代码${NC}"
+                exit 1
+            fi
+        else
+            echo -e "${RED}错误：未找到 app.js 文件，且用户选择不下载${NC}"
+            exit 1
+        fi
+    else
+        echo -e "${RED}错误：未找到 app.js 文件，且未安装 git 无法下载${NC}"
+        exit 1
+    fi
 else
     echo -e "${GREEN}成功${NC}"
 fi
@@ -422,7 +709,8 @@ if [ $SUPPORT_SYSTEMD -eq 1 ]; then
         echo "  - 查看状态：systemctl status $SERVICE_NAME"
         echo "  - 查看日志：tail -f $LOG_FILE"
         echo "  - 关闭开机自启：systemctl disable $SERVICE_NAME"
-        echo "  - 卸载服务：sudo $0 （选择 2）"
+        echo "  - 卸载服务：sudo $0 （选择 3）"
+        echo "  - 更新服务：sudo $0 （选择 2）"
     else
         echo -e "${YELLOW}跳过开机自启配置${NC}"
     fi
