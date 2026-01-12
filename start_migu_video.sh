@@ -58,7 +58,7 @@ install_node_deps() {
     fi
 }
 
-# 生成 Systemd 配置
+# 生成 Systemd 配置（新增3个环境变量）
 create_systemd_service() {
     echo "生成 Systemd 服务配置文件..."
     cat > $SERVICE_FILE << EOF
@@ -74,6 +74,9 @@ Environment="mtoken=$MTOKEN"
 Environment="mport=$MPORT"
 Environment="mhost=$MHOST"
 Environment="mrateType=$MRATE_TYPE"
+Environment="menableHDR=$MENABLE_HDR"
+Environment="menableH265=$MENABLE_H265"
+Environment="mupdateInterval=$MUPDATE_INTERVAL"
 ExecStart=$NODE_PATH app.js
 StandardOutput=append:$LOG_FILE
 StandardError=append:$LOG_FILE
@@ -174,13 +177,21 @@ read -p "设置日志路径 (默认: $WORK_DIR/migu_video.log): " LOG_FILE
 LOG_FILE=${LOG_FILE:-"$WORK_DIR/migu_video.log"}
 ensure_log_file "$LOG_FILE"
 
-# 第三步：输入业务配置参数
+# 第三步：输入业务配置参数（优化+新增配置项）
 echo "步骤 3: 配置业务参数..."
-read -p "muserId (1809453805): " MUSER_ID; MUSER_ID=${MUSER_ID:-1809453805}
-read -p "mtoken (nlps0F2CDBC2A96ABD03DF3D): " MTOKEN; MTOKEN=${MTOKEN:-nlps0F2CDBC2A96ABD03DF3D}
+read -p "muserId (180945xxxx): " MUSER_ID; MUSER_ID=${MUSER_ID:-180945xxxx}
+read -p "mtoken (nlps0F2CDBC2A96ABD03xxxx): " MTOKEN; MTOKEN=${MTOKEN:-nlps0F2CDBC2A96ABD03xxxx}
 read -p "mport (1234): " MPORT; MPORT=${MPORT:-1234}
 read -p "mhost (http://10.10.1.4:1234): " MHOST; MHOST=${MHOST:-http://10.10.1.4:1234}
-read -p "mrateType (4): " MRATE_TYPE; MRATE_TYPE=${MRATE_TYPE:-4}
+# 优化mrateType提示，补充画质说明
+echo "【mrateType 可选值】2:标清 | 3:高清 | 4:蓝光 | 7:原画 | 9:4k"
+read -p "mrateType (默认4，蓝光): " MRATE_TYPE; MRATE_TYPE=${MRATE_TYPE:-4}
+# 新增menableHDR配置（boolean类型，带解释）
+read -p "menableHDR (true/false，默认true，是否开启HDR): " MENABLE_HDR; MENABLE_HDR=${MENABLE_HDR:-true}
+# 新增menableH265配置（boolean类型，带兼容性提示）
+read -p "menableH265 (true/false，默认true，是否开启h265(原画画质)，开启后可能存在浏览器播放无画面等兼容性问题): " MENABLE_H265; MENABLE_H265=${MENABLE_H265:-true}
+# 新增mupdateInterval配置（string类型，单位小时，带提示）
+read -p "mupdateInterval (默认6，节目信息更新间隔，单位小时，不建议设置太短): " MUPDATE_INTERVAL; MUPDATE_INTERVAL=${MUPDATE_INTERVAL:-6}
 
 # 第四步：环境准备与启动
 echo "步骤 4: 正在启动服务..."
