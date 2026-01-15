@@ -8,7 +8,7 @@ DEFAULT_WORK_DIR="/root/migu_video"
 DEFAULT_LOG_FILE="/root/migu_video/migu_video.log"
 NODE_PATH="/usr/bin/node"
 NPM_PATH="/usr/bin/npm"
-GITHUB_REPO="https://github.com/zAhYAng/migu_video.git"
+GITHUB_REPO="https://hk.gh-proxy.org/https://github.com/zAhYAng/migu_video.git"
 BACKUP_DIR="/root/migu_video_backup"
 
 # ====================== 工具函数 ======================
