@@ -16,28 +16,64 @@ GITHUB_API="https://api.github.com/repos/EasyTier/EasyTier/releases/latest"
 DOWNLOAD_BASE_URL="https://docker.mk/https://github.com/EasyTier/EasyTier/releases/download/"
 
 # -------------------------------
-# 工具函数 (修复 A & B)
+# 动态依赖检查函数 (按需触发)
 # -------------------------------
-check_root() { [ "$EUID" -ne 0 ] && echo -e "${RED}请以 root 运行${NC}" && exit 1; }
+# $1: 命令名, $2: 软件包名(可选)
+ensure_dependency() {
+    local cmd="$1"
+    local pkg="${2:-$1}"
+    if ! command -v "$cmd" &> /dev/null; then
+        echo -e "${YELLOW}检测到缺少必要组件: $cmd, 正在尝试自动安装 $pkg...${NC}"
+        if command -v apt-get &> /dev/null; then
+            apt-get update -qq && apt-get install -y "$pkg"
+        elif command -v yum &> /dev/null; then
+            yum install -y epel-release && yum install -y "$pkg"
+        else
+            echo -e "${RED}无法自动安装 $pkg，请手动安装后重新运行脚本。${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}$cmd 安装完成。${NC}"
+    fi
+}
+
+# -------------------------------
+# 工具函数
+# -------------------------------
+check_root() { 
+    [ "$EUID" -ne 0 ] && echo -e "${RED}请以 root 权限运行此脚本。${NC}" && exit 1 
+}
 
 get_version() {
+    ensure_dependency "curl"
     local VERSION=$(curl -fsSL "$GITHUB_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     [ -z "$VERSION" ] && VERSION=$(curl -fsSL -I "https://github.com/EasyTier/EasyTier/releases/latest" | grep -i "location:" | awk -F'/' '{print $NF}' | tr -d '\r')
     echo "$VERSION"
 }
 
-get_phy_iface() { ip route | grep default | awk '{print $5}' | head -1; }
+get_phy_iface() { 
+    ensure_dependency "ip" "iproute2"
+    ip route | grep default | awk '{print $5}" | head -1
+}
 
 # -------------------------------
-# 核心部署逻辑
+# 核心下载与解压逻辑
 # -------------------------------
 download_and_extract() {
     local VERSION="$1"
+    
+    # 下载和解压所需的组件
+    ensure_dependency "wget"
+    ensure_dependency "unzip"
+
     local ARCH=$(uname -m)
-    case $ARCH in x86_64) ARCH="x86_64" ;; aarch64) ARCH="aarch64" ;; *) ARCH="x86_64" ;; esac
+    case $ARCH in 
+        x86_64) ARCH="x86_64" ;; 
+        aarch64) ARCH="aarch64" ;; 
+        *) ARCH="x86_64" ;; 
+    esac
     
     local download_url="${DOWNLOAD_BASE_URL}${VERSION}/easytier-linux-${ARCH}-${VERSION}.zip"
-    echo -e "${YELLOW}正在下载 EasyTier ${VERSION}...${NC}"
+    echo -e "${YELLOW}正在从 GitHub 下载 EasyTier ${VERSION}...${NC}"
     wget -q --show-progress -O "/tmp/easytier.zip" "$download_url"
     
     local temp_dir="/tmp/et_temp"
@@ -45,19 +81,19 @@ download_and_extract() {
     unzip -q -o "/tmp/easytier.zip" -d "$temp_dir"
 
     mkdir -p "$INSTALL_DIR"
+    # 使用 find 兼容不同压缩包内的路径结构
     mv -f $(find "$temp_dir" -name "$CORE_BINARY" -type f) "$INSTALL_DIR/"
     mv -f $(find "$temp_dir" -name "$WEB_BINARY" -type f) "$INSTALL_DIR/"
     chmod +x "${INSTALL_DIR}/${CORE_BINARY}" "${INSTALL_DIR}/${WEB_BINARY}"
+    
     rm -rf "$temp_dir" "/tmp/easytier.zip"
+    echo -e "${GREEN}程序文件已就绪。${NC}"
 }
 
 # -------------------------------
-# 服务创建：集成你提供的默认配置参数
+# 服务创建逻辑
 # -------------------------------
 create_web_service() {
-    # 基于你提供的参数进行构建
-    # --api-server-port: 前后端交互端口
-    # --config-server-port: 节点连接端口
     local EXEC_CMD="${INSTALL_DIR}/${WEB_BINARY} \
         --api-server-port 11211 \
         --api-host \"http://127.0.0.1:11211\" \
@@ -81,35 +117,36 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload && systemctl enable --now "$WEB_SERVICE"
     
+    ensure_dependency "curl"
     local IP=$(curl -s ifconfig.me || hostname -I | awk '{print $1}')
-    echo -e "${GREEN}Web 管理后台启动成功！${NC}"
-    echo -e "Dashboard 地址: ${YELLOW}http://${IP}:11211${NC}"
-    echo -e "配置下发协议: ${YELLOW}udp://服务器IP:22020${NC}"
+    echo -e "\n${GREEN}EasyTier Web 服务已启动！${NC}"
+    echo -e "管理后台: ${YELLOW}http://${IP}:11211${NC}"
+    echo -e "配置服务器: ${YELLOW}udp://${IP}:22020${NC}"
 }
 
 create_core_service() {
-    echo -e "\n${YELLOW}请选择 Core 运行模式:${NC}"
-    echo "1) 手动模式 (命令行指定 IP/名称/密钥)"
-    echo "2) 受管模式 (连接配置服务器)"
-    read -p "选择 [1-2]: " MODE
+    echo -e "\n${YELLOW}--- Core 节点配置 ---${NC}"
+    echo "1) 手动模式 (指定虚拟IP/网络名/密钥)"
+    echo "2) 受管模式 (连接到 Web 版的配置服务器)"
+    read -p "请选择模式 [1-2]: " MODE
 
     local EXEC_CMD=""
     if [ "$MODE" == "1" ]; then
-        read -p "虚拟 IPv4 (如 10.144.144.1): " IPV4
-        read -p "网络名称: " NET_NAME
-        read -p "网络密钥: " NET_SECRET
-        read -p "相邻节点 (可选): " PEERS
+        read -p "设定虚拟 IPv4 (例如 10.144.144.1): " IPV4
+        read -p "设定网络名称: " NET_NAME
+        read -p "设定网络密钥: " NET_SECRET
+        read -p "相邻节点 (可选, 如 tcp://1.2.3.4:11010): " PEERS
         EXEC_CMD="${INSTALL_DIR}/${CORE_BINARY} --ipv4 ${IPV4} --network-name ${NET_NAME} --network-secret ${NET_SECRET}"
         [ -n "$PEERS" ] && EXEC_CMD="${EXEC_CMD} --peers ${PEERS}"
     else
-        read -p "主机名: " HNAME
-        read -p "配置服务器 (udp://IP:22020/Network): " C_SERVER
+        read -p "设定主机名: " HNAME
+        read -p "输入配置服务器地址 (例如 udp://服务器IP:22020/MyNetwork): " C_SERVER
         EXEC_CMD="${INSTALL_DIR}/${CORE_BINARY} --hostname ${HNAME} --config-server ${C_SERVER}"
     fi
 
     cat > "/etc/systemd/system/${CORE_SERVICE}" << EOF
 [Unit]
-Description=EasyTier Service
+Description=EasyTier Core Service
 After=network.target
 
 [Service]
@@ -122,6 +159,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload && systemctl enable --now "$CORE_SERVICE"
+    echo -e "${GREEN}Core 节点服务已启动！${NC}"
 }
 
 # -------------------------------
@@ -129,27 +167,58 @@ EOF
 # -------------------------------
 main_menu() {
     while true; do
-        echo -e "\n${GREEN}EasyTier 管理脚本 (正式默认版)${NC}"
+        echo -e "\n${GREEN}======= EasyTier 管理脚本 =======${NC}"
         echo "1. 安装/配置 Core 节点"
-        echo "2. 安装/启动 Web Embed (11211/22020)"
-        echo "3. 开启网关转发 (NAT)"
-        echo "4. 查看服务状态"
+        echo "2. 安装/启动 Web 管理端 (含配置下发)"
+        echo "3. 开启网关转发 (NAT/入站转发)"
+        echo "4. 查看当前运行状态"
         echo "5. 卸载 EasyTier"
         echo "0. 退出"
-        read -p "选择: " choice
+        echo -e "${GREEN}=================================${NC}"
+        read -p "请输入选项 [0-5]: " choice
         case $choice in
-            1) check_root; download_and_extract $(get_version); create_core_service ;;
-            2) check_root; download_and_extract $(get_version); create_web_service ;;
-            3) check_root; PHY=$(get_phy_iface)
-               echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-et.conf && sysctl -p /etc/sysctl.d/99-et.conf
-               iptables -t nat -A POSTROUTING -o "$PHY" -j MASQUERADE
-               iptables -A FORWARD -i "$PHY" -j ACCEPT
-               echo "网关已开启 (网卡: $PHY)" ;;
-            4) systemctl status "$CORE_SERVICE" "$WEB_SERVICE" | grep -E "Active|Loaded" ;;
-            5) systemctl stop "$CORE_SERVICE" "$WEB_SERVICE"; rm -f /etc/systemd/system/easytier*; rm -rf "$INSTALL_DIR"; echo "已卸载" ;;
-            0) exit 0 ;;
+            1)
+                check_root
+                download_and_extract $(get_version)
+                create_core_service
+                ;;
+            2)
+                check_root
+                download_and_extract $(get_version)
+                create_web_service
+                ;;
+            3)
+                check_root
+                ensure_dependency "iptables"
+                PHY_IF=$(get_phy_iface)
+                echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-et.conf
+                sysctl -p /etc/sysctl.d/99-et.conf
+                iptables -t nat -A POSTROUTING -o "$PHY_IF" -j MASQUERADE
+                iptables -A FORWARD -i "$PHY_IF" -j ACCEPT
+                echo -e "${GREEN}网关转发已开启，出口网卡: $PHY_IF${NC}"
+                ;;
+            4)
+                echo -e "\n${YELLOW}服务状态:${NC}"
+                systemctl status "$CORE_SERVICE" "$WEB_SERVICE" 2>/dev/null | grep -E "Active|Loaded" || echo "未检测到运行中的 EasyTier 服务"
+                ;;
+            5)
+                check_root
+                systemctl stop "$CORE_SERVICE" "$WEB_SERVICE" 2>/dev/null
+                systemctl disable "$CORE_SERVICE" "$WEB_SERVICE" 2>/dev/null
+                rm -f /etc/systemd/system/easytier*
+                systemctl daemon-reload
+                rm -rf "$INSTALL_DIR"
+                echo -e "${RED}EasyTier 已彻底卸载。${NC}"
+                ;;
+            0)
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}无效选项，请重新输入。${NC}"
+                ;;
         esac
     done
 }
 
+# 启动脚本
 main_menu
