@@ -19,37 +19,27 @@ check_root() {
     fi
 }
 
-# 确保日志文件存在
 ensure_log_file() {
     local log_path=$1
     local log_dir=$(dirname "$log_path")
-
     echo "检查日志环境..."
     if [ ! -d "$log_dir" ]; then
         echo "创建日志目录: $log_dir"
         mkdir -p "$log_dir"
         chmod 755 "$log_dir"
     fi
-
     if [ ! -f "$log_path" ]; then
         echo "创建日志文件: $log_path"
         touch "$log_path"
         chmod 644 "$log_path"
-    else
-        echo "日志文件已存在：$log_path"
     fi
 }
 
-# 安装依赖并验证
 install_node_deps() {
     local work_dir=$1
     echo "检测并安装 Node.js 依赖..."
     cd "$work_dir"
-    
-    # 安装核心依赖
     $NPM_PATH install axios --save > /dev/null 2>&1
-    
-    # 使用 CommonJS 语法验证
     if $NODE_PATH -e "require('axios')" > /dev/null 2>&1; then
         echo "axios 依赖检测成功"
     else
@@ -58,7 +48,7 @@ install_node_deps() {
     fi
 }
 
-# 生成 Systemd 配置（新增3个环境变量）
+# 生成 Systemd 配置 (集成新增的分类控制变量)
 create_systemd_service() {
     echo "生成 Systemd 服务配置文件..."
     cat > $SERVICE_FILE << EOF
@@ -77,6 +67,9 @@ Environment="mrateType=$MRATE_TYPE"
 Environment="menableHDR=$MENABLE_HDR"
 Environment="menableH265=$MENABLE_H265"
 Environment="mupdateInterval=$MUPDATE_INTERVAL"
+Environment="mignoreCategory=$MIGNORE_CATEGORY"
+Environment="mmergeTVCategory=$MMERGE_TV_CATEGORY"
+Environment="mcustomMergeCategory=$MCUSTOM_MERGE_CATEGORY"
 ExecStart=$NODE_PATH app.js
 StandardOutput=append:$LOG_FILE
 StandardError=append:$LOG_FILE
@@ -89,32 +82,26 @@ EOF
     systemctl daemon-reload
 }
 
-# ====================== 核心逻辑：更新服务 (模式 2) ======================
+# ====================== 核心逻辑：更新服务 ======================
 update_service() {
     echo "======================================="
     echo "          开始更新咪咕视频服务           "
     echo "======================================="
     check_root
-    
     read -p "请输入当前服务工作目录 (默认: $DEFAULT_WORK_DIR): " WORK_DIR
     WORK_DIR=${WORK_DIR:-$DEFAULT_WORK_DIR}
 
-    echo "1. 停止当前运行进程..."
     systemctl stop $SERVICE_NAME 2>/dev/null || true
     pkill -f "node app.js" || true
 
     if [ -d "$WORK_DIR" ]; then
-        echo "2. 备份当前代码..."
         mkdir -p "$BACKUP_DIR"
         tar -czf "$BACKUP_DIR/backup_$(date +%Y%m%d_%H%M%S).tar.gz" -C "$WORK_DIR" . || true
     fi
 
-    echo "3. 获取最新代码..."
     TEMP_CLONE="/tmp/migu_clone_$(date +%s)"
     if git clone --depth=1 "$GITHUB_REPO" "$TEMP_CLONE"; then
         mkdir -p "$WORK_DIR"
-        echo "同步文件中 (保留日志)..."
-        # 清理旧代码文件，但保留 .log 文件
         find "$WORK_DIR" -maxdepth 1 ! -name '.' ! -name '*.log' -exec rm -rf {} +
         cp -r "$TEMP_CLONE"/. "$WORK_DIR/"
         rm -rf "$TEMP_CLONE"
@@ -139,11 +126,9 @@ echo "  3) 卸载服务"
 read -p "选择 (1/2/3, 默认1): " OPTION
 OPTION=${OPTION:-1}
 
-# 模式判断
 if [ "$OPTION" == "2" ]; then update_service; fi
 if [ "$OPTION" == "3" ]; then
     check_root
-    echo "正在卸载服务..."
     systemctl stop $SERVICE_NAME 2>/dev/null || true
     systemctl disable $SERVICE_NAME 2>/dev/null || true
     rm -f $SERVICE_FILE
@@ -151,56 +136,54 @@ if [ "$OPTION" == "3" ]; then
 fi
 
 # ====================== 模式 1：安装逻辑 ======================
-
-# 第一步：创建目录并拉取代码
-echo "步骤 1: 准备工作目录与代码..."
+check_root
 read -p "设置工作目录 (默认: $DEFAULT_WORK_DIR): " WORK_DIR
 WORK_DIR=${WORK_DIR:-$DEFAULT_WORK_DIR}
-
 mkdir -p "$WORK_DIR"
 
 if [ ! -f "$WORK_DIR/app.js" ]; then
-    echo "正在拉取代码至 $WORK_DIR ..."
-    # 如果目录里有碎文件导致无法 clone，进行清理（避开日志）
     if [ "$(ls -A $WORK_DIR)" ]; then
         find "$WORK_DIR" -maxdepth 1 ! -name '.' ! -name '*.log' -exec rm -rf {} +
     fi
     git clone --depth=1 "$GITHUB_REPO" "$WORK_DIR"
-else
-    echo "代码已存在，跳过克隆。"
 fi
 
-# 第二步：检查/创建日志文件
-echo "步骤 2: 检查并创建日志文件..."
-# 默认日志放在工作目录下
 read -p "设置日志路径 (默认: $WORK_DIR/migu_video.log): " LOG_FILE
 LOG_FILE=${LOG_FILE:-"$WORK_DIR/migu_video.log"}
 ensure_log_file "$LOG_FILE"
 
-# 第三步：输入业务配置参数（优化+新增配置项）
 echo "步骤 3: 配置业务参数..."
 read -p "muserId (180945xxxx): " MUSER_ID; MUSER_ID=${MUSER_ID:-180945xxxx}
 read -p "mtoken (nlps0F2CDBC2A96ABD03xxxx): " MTOKEN; MTOKEN=${MTOKEN:-nlps0F2CDBC2A96ABD03xxxx}
 read -p "mport (1234): " MPORT; MPORT=${MPORT:-1234}
 read -p "mhost (http://10.10.1.4:1234): " MHOST; MHOST=${MHOST:-http://10.10.1.4:1234}
-# 优化mrateType提示，补充画质说明
-echo "【mrateType 可选值】2:标清 | 3:高清 | 4:蓝光 | 7:原画 | 9:4k"
-read -p "mrateType (默认4，蓝光): " MRATE_TYPE; MRATE_TYPE=${MRATE_TYPE:-4}
-# 新增menableHDR配置（boolean类型，带解释）
-read -p "menableHDR (true/false，默认true，是否开启HDR): " MENABLE_HDR; MENABLE_HDR=${MENABLE_HDR:-true}
-# 新增menableH265配置（boolean类型，带兼容性提示）
-read -p "menableH265 (true/false，默认true，是否开启h265(原画画质)，开启后可能存在浏览器播放无画面等兼容性问题): " MENABLE_H265; MENABLE_H265=${MENABLE_H265:-true}
-# 新增mupdateInterval配置（string类型，单位小时，带提示）
-read -p "mupdateInterval (默认6，节目信息更新间隔，单位小时，不建议设置太短): " MUPDATE_INTERVAL; MUPDATE_INTERVAL=${MUPDATE_INTERVAL:-6}
+echo "【画质】2:标清 | 3:高清 | 4:蓝光 | 7:原画 | 9:4k"
+read -p "mrateType (默认4): " MRATE_TYPE; MRATE_TYPE=${MRATE_TYPE:-4}
+read -p "menableHDR (true/false, 默认true): " MENABLE_HDR; MENABLE_HDR=${MENABLE_HDR:-true}
+read -p "menableH265 (true/false, 默认true): " MENABLE_H265; MENABLE_H265=${MENABLE_H265:-true}
+read -p "mupdateInterval (默认6小时): " MUPDATE_INTERVAL; MUPDATE_INTERVAL=${MUPDATE_INTERVAL:-6}
 
-# 第四步：环境准备与启动
+# --- 新增分类控制参数 ---
+echo "【分类屏蔽】多个用逗号隔开 (例: 央视,卫视 | TV:全电视 | PE:全体育)"
+read -p "mignoreCategory (留空则不屏蔽): " MIGNORE_CATEGORY
+MIGNORE_CATEGORY=${MIGNORE_CATEGORY:-""}
+
+read -p "mmergeTVCategory (是否自动合并小分类 true/false, 默认true): " MMERGE_TV_CATEGORY
+MMERGE_TV_CATEGORY=${MMERGE_TV_CATEGORY:-true}
+
+if [ "$MMERGE_TV_CATEGORY" = "false" ]; then
+    echo "【自定义合并】格式: 分类1,分类2 (仅在不自动合并时生效)"
+    read -p "mcustomMergeCategory (留空则不合并): " MCUSTOM_MERGE_CATEGORY
+    MCUSTOM_MERGE_CATEGORY=${MCUSTOM_MERGE_CATEGORY:-""}
+else
+    MCUSTOM_MERGE_CATEGORY=""
+fi
+# -----------------------
+
 echo "步骤 4: 正在启动服务..."
 install_node_deps "$WORK_DIR"
-
-# 停止可能存在的冲突进程
 systemctl stop $SERVICE_NAME 2>/dev/null || true
 pkill -f "node app.js" || true
-
 create_systemd_service
 systemctl enable $SERVICE_NAME --now
 
@@ -211,5 +194,5 @@ if systemctl is-active --quiet $SERVICE_NAME; then
     echo "访问地址: http://$(echo "$MHOST" | awk -F'[:/]' '{print $4}'):$MPORT"
     echo "======================================="
 else
-    echo "启动可能存在问题，请检查日志: $LOG_FILE"
+    echo "启动失败，请检查日志: $LOG_FILE"
 fi
